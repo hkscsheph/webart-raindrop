@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Rain Shield: Fixed Aspect Ratio</title>
+    <title>AI Rain Shield: Ultra-Efficient</title>
     <style>
         body {
             margin: 0;
@@ -46,12 +46,10 @@
         .tab-btn { background-color: #28a745; }
         .tab-btn:hover { background-color: #218838; }
         
-        /* Fixed Aspect Ratio Container Box */
         #container {
             position: relative;
             width: 100%;
             max-width: 800px;
-            /* Aspect-ratio keeps the container proportional dynamically */
             aspect-ratio: 16 / 9; 
             background: #000;
             border-radius: 8px;
@@ -65,7 +63,6 @@
             width: 100%;
             height: 100%;
             border-radius: 8px;
-            /* Prevents squishing and maintains correct dimensions */
             object-fit: contain; 
         }
         video {
@@ -122,10 +119,13 @@
 
         let segmenter = null;
         let raindrops = [];
-        let humanMaskCanvas = null;
-        let maskCtx = null;
         let activeStream = null;
-        const maxRaindrops = 200;
+        const maxRaindrops = 250; // Performance is optimized enough to handle more raindrops seamlessly
+
+        // Optimization Storage Arrays
+        let currentMaskData = null; 
+        let lastAITime = 0;
+        const aiInterval = 1000 / 30; // Throttle AI segmentation to max 30 FPS
 
         // --- 1. Load the AI Segmentation Model ---
         async function loadModel() {
@@ -142,12 +142,12 @@
                 const segmenterConfig = {
                     runtime: 'mediapipe',
                     solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation',
-                    modelType: 'landscape' 
+                    modelType: 'landscape' // Drastically faster model architecture
                 };
                 segmenter = await bodySegmentation.createSegmenter(model, segmenterConfig);
                 loadingDiv.style.display = 'none';
             } catch (err) {
-                loadingDiv.innerHTML = `<span style="color: #ff6b6b; font-weight: bold;">Model Load Failed</span><br><small style="font-size:12px; color:#aaa;">Check privacy settings or network.</small>`;
+                loadingDiv.innerHTML = `<span style="color: #ff6b6b; font-weight: bold;">Model Load Failed</span><br><small style="font-size:12px; color:#aaa;">Disable tracker blockers and refresh.</small>`;
                 console.error(err);
             }
         }
@@ -168,23 +168,16 @@
             const track = stream.getVideoTracks()[0];
             const settings = track.getSettings();
             
-            // Apply real incoming track resolution directly to coordinate bounds
             const streamWidth = settings.width || video.videoWidth || 800;
             const streamHeight = settings.height || video.videoHeight || 450;
             
             canvas.width = streamWidth;
             canvas.height = streamHeight;
             
-            // Adjust CSS container box to dynamically lock to whatever resolution format is sent
             document.getElementById('container').style.aspectRatio = `${streamWidth} / ${streamHeight}`;
             
-            humanMaskCanvas = document.createElement('canvas');
-            humanMaskCanvas.width = canvas.width;
-            humanMaskCanvas.height = canvas.height;
-            maskCtx = humanMaskCanvas.getContext('2d');
-            
             initRain();
-            animate();
+            requestAnimationFrame(animate);
         }
 
         webcamBtn.addEventListener('click', async () => {
@@ -233,53 +226,62 @@
             return drop;
         }
 
-        function isPixelHuman(x, y) {
-            if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height) return false;
-            const imgData = maskCtx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
-            return imgData[3] > 0; 
+        // ULTRA EFFICIENT MEMORY LOOKUP (Replaces CPU-melting getImageData)
+        function isPixelHumanFast(x, y, width, height) {
+            if (x < 0 || x >= width || y < 0 || y >= height || !currentMaskData) return false;
+            // Map 2D spatial coordinates into the flat 1D alpha-channel array index
+            const index = (Math.floor(y) * width + Math.floor(x)) * 4;
+            return currentMaskData[index + 3] > 0; 
         }
 
-        // --- 4. Main Graphics Loop ---
-        async function animate() {
+        // --- 4. Main Performance Graphics Loop ---
+        async function animate(timestamp) {
             if (video.paused || video.ended) return;
 
+            // Render camera frame background
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-            if (segmenter) {
+            // Optimization: Only compute the AI mask 30 times a second max
+            if (segmenter && timestamp - lastAITime >= aiInterval) {
                 try {
                     const segmentation = await segmenter.segmentPeople(video);
                     const foregroundColor = {r: 255, g: 255, b: 255, a: 255};
                     const backgroundColor = {r: 0, g: 0, b: 0, a: 0};
                     const mask = await bodySegmentation.toBinaryMask(segmentation, foregroundColor, backgroundColor);
                     
-                    const imageData = new ImageData(mask.data, mask.width, mask.height);
-                    maskCtx.putImageData(imageData, 0, 0);
+                    // Directly bind the raw Uint8Array for instant lookups
+                    currentMaskData = mask.data;
+                    lastAITime = timestamp;
                 } catch (e) {
-                    console.error("AI engine exception:", e);
+                    console.error("AI execution fallback:", e);
                 }
             }
 
             ctx.lineCap = 'round';
+            const w = canvas.width;
+            const h = canvas.height;
 
+            // Process particles at full 60FPS using the fast memory map
             for (let i = 0; i < raindrops.length; i++) {
                 let drop = raindrops[i];
                 let nextX = drop.x + drop.vx;
                 let nextY = drop.y + drop.vy;
 
-                if (maskCtx) {
-                    const hitDetected = isPixelHuman(nextX, nextY);
+                if (currentMaskData) {
+                    const hitDetected = isPixelHumanFast(nextX, nextY, w, h);
 
                     if (hitDetected && !drop.isDeflected) {
                         drop.isDeflected = true;
                         
+                        // Rapid proximity testing via memory offset increments
                         let lookLeft = 0;
                         let lookRight = 0;
                         
                         for (let offset = 1; offset < 35; offset++) {
-                            if (!isPixelHuman(nextX - offset, nextY)) { lookLeft = offset; break; }
+                            if (!isPixelHumanFast(nextX - offset, nextY, w, h)) { lookLeft = offset; break; }
                         }
                         for (let offset = 1; offset < 35; offset++) {
-                            if (!isPixelHuman(nextX + offset, nextY)) { lookRight = offset; break; }
+                            if (!isPixelHumanFast(nextX + offset, nextY, w, h)) { lookRight = offset; break; }
                         }
 
                         if (lookLeft > 0 && (lookLeft < lookRight || lookRight === 0)) {
@@ -312,7 +314,7 @@
                 ctx.lineTo(drop.x + (drop.vx * 0.5), drop.y + drop.length);
                 ctx.stroke();
 
-                if (drop.y > canvas.height || drop.x < 0 || drop.x > canvas.width || (drop.isDeflected && drop.life <= 0)) {
+                if (drop.y > h || drop.x < 0 || drop.x > w || (drop.isDeflected && drop.life <= 0)) {
                     resetDrop(drop);
                 }
             }

@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Rain Shield: Webcam & Tab Source</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: #111;
+        color: #fff;
+        font-family: sans-serif;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        overflow: hidden;
+      }
+      #controls {
+        margin-bottom: 15px;
+        z-index: 10;
+        display: flex;
+        gap: 15px;
+      }
+      button {
+        padding: 12px 24px;
+        font-size: 16px;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-weight: bold;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+        transition: background 0.2s;
+      }
+      .webcam-btn {
+        background-color: #007bff;
+      }
+      .webcam-btn:hover {
+        background-color: #0056b3;
+      }
+      .tab-btn {
+        background-color: #28a745;
+      }
+      .tab-btn:hover {
+        background-color: #218838;
+      }
+      #container {
+        position: relative;
+        width: 800px;
+        height: 450px;
+        background: #000;
+        border-radius: 8px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+      }
+      video,
+      canvas {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        border-radius: 8px;
+      }
+      video {
+        display: none;
+      }
+      #loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 18px;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.85);
+        padding: 15px 25px;
+        border-radius: 5px;
+        pointer-events: none;
+        display: none;
+        text-align: center;
+        border: 1px solid #444;
+        z-index: 20;
+      }
+    </style>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.20.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.20.0"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.20.0"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-segmentation@1.0.2"></script>
+  </head>
+  <body>
+    <div id="controls">
+      <button id="webcamBtn" class="webcam-btn">Use Webcam Mode</button>
+      <button id="tabBtn" class="tab-btn">Use Tab Capture Mode</button>
+    </div>
+
+    <div id="container">
+      <div id="loading">Loading AI Model Engine...</div>
+      <video id="srcVideo" autoplay playsinline muted></video>
+      <canvas id="outputCanvas"></canvas>
+    </div>
+
+    <script>
+      const video = document.getElementById('srcVideo');
+      const canvas = document.getElementById('outputCanvas');
+      const ctx = canvas.getContext('2d');
+      const webcamBtn = document.getElementById('webcamBtn');
+      const tabBtn = document.getElementById('tabBtn');
+      const controlsDiv = document.getElementById('controls');
+      const loadingDiv = document.getElementById('loading');
+
+      let segmenter = null;
+      let raindrops = [];
+      let humanMaskCanvas = null;
+      let maskCtx = null;
+      let activeStream = null;
+      const maxRaindrops = 200;
+
+      // --- 1. Load the AI Segmentation Model ---
+      async function loadModel() {
+        loadingDiv.style.display = 'block';
+        try {
+          if (typeof tf !== 'undefined') {
+            await tf.setBackend('webgl');
+            await tf.ready();
+          } else {
+            throw new Error('TensorFlow script load blocked.');
+          }
+
+          const model =
+            bodySegmentation.SupportedModels.MediaPipeSelfieSegmentation;
+          const segmenterConfig = {
+            runtime: 'mediapipe',
+            solutionPath:
+              'https://cdn.jsdelivr.net/npm/@mediapipe/selfie_segmentation',
+            modelType: 'landscape',
+          };
+          segmenter = await bodySegmentation.createSegmenter(
+            model,
+            segmenterConfig
+          );
+          loadingDiv.style.display = 'none';
+        } catch (err) {
+          loadingDiv.innerHTML = `<span style="color: #ff6b6b; font-weight: bold;">Model Load Failed</span><br><small style="font-size:12px; color:#aaa;">Check privacy extensions/adblockers.</small>`;
+          console.error(err);
+        }
+      }
+
+      // --- 2. Stream Pipeline Setup ---
+      async function startProcessingStream(stream) {
+        activeStream = stream;
+        video.srcObject = stream;
+        controlsDiv.style.display = 'none'; // Hide selection buttons
+
+        if (!segmenter) {
+          await loadModel();
+        }
+
+        await video.play();
+        await new Promise((resolve) => setTimeout(resolve, 250)); // Stabilize frame pipe
+
+        // Resolve resolution parameters
+        const track = stream.getVideoTracks()[0];
+        const settings = track.getSettings();
+
+        canvas.width = settings.width || video.videoWidth || 800;
+        canvas.height = settings.height || video.videoHeight || 450;
+
+        // Offscreen processing buffer setup
+        humanMaskCanvas = document.createElement('canvas');
+        humanMaskCanvas.width = canvas.width;
+        humanMaskCanvas.height = canvas.height;
+        maskCtx = humanMaskCanvas.getContext('2d');
+
+        initRain();
+        animate();
+      }
+
+      // Mode A: Webcam Capture
+      webcamBtn.addEventListener('click', async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false,
+          });
+          await startProcessingStream(stream);
+        } catch (err) {
+          console.error(err);
+          alert('Webcam permission denied or busy.');
+        }
+      });
+
+      // Mode B: Tab/Screen Screen Capture
+      tabBtn.addEventListener('click', async () => {
+        try {
+          const stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: false,
+          });
+          await startProcessingStream(stream);
+        } catch (err) {
+          console.error(err);
+          alert('Tab capture selection rejected.');
+        }
+      });
+
+      // --- 3. Custom Physics Particle Engine ---
+      function initRain() {
+        raindrops = [];
+        for (let i = 0; i < maxRaindrops; i++) {
+          raindrops.push(resetDrop({}));
+        }
+      }
+
+      function resetDrop(drop) {
+        drop.x = Math.random() * canvas.width;
+        drop.y = Math.random() * -50;
+        drop.length = Math.random() * 15 + 10;
+        drop.vy = Math.random() * 10 + 10;
+        drop.vx = (Math.random() - 0.5) * 1;
+        drop.weight = Math.random() * 3 + 1;
+        drop.isDeflected = false;
+        drop.life = 1.0;
+        return drop;
+      }
+
+      function isPixelHuman(x, y) {
+        if (x < 0 || x >= canvas.width || y < 0 || y >= canvas.height)
+          return false;
+        const imgData = maskCtx.getImageData(
+          Math.floor(x),
+          Math.floor(y),
+          1,
+          1
+        ).data;
+        return imgData[3] > 0; // Check alpha channel
+      }
+
+      // --- 4. Main Graphics Loop ---
+      async function animate() {
+        if (video.paused || video.ended) return;
+
+        // Render live frames onto backdrop canvas surface
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        if (segmenter) {
+          try {
+            const segmentation = await segmenter.segmentPeople(video);
+            const foregroundColor = { r: 255, g: 255, b: 255, a: 255 };
+            const backgroundColor = { r: 0, g: 0, b: 0, a: 0 };
+            const mask = await bodySegmentation.toBinaryMask(
+              segmentation,
+              foregroundColor,
+              backgroundColor
+            );
+
+            const imageData = new ImageData(mask.data, mask.width, mask.height);
+            maskCtx.putImageData(imageData, 0, 0);
+          } catch (e) {
+            console.error('AI engine exception:', e);
+          }
+        }
+
+        // Step D: Update and Render Large Raindrops
+        ctx.lineCap = 'round';
+
+        for (let i = 0; i < raindrops.length; i++) {
+          let drop = raindrops[i];
+
+          let nextX = drop.x + drop.vx;
+          let nextY = drop.y + drop.vy;
+
+          if (maskCtx) {
+            const hitDetected = isPixelHuman(nextX, nextY);
+
+            if (hitDetected && !drop.isDeflected) {
+              drop.isDeflected = true;
+
+              let lookLeft = 0;
+              let lookRight = 0;
+
+              for (let offset = 1; offset < 50; offset++) {
+                if (!isPixelHuman(nextX - offset, nextY)) {
+                  lookLeft = offset;
+                  break;
+                }
+              }
+              for (let offset = 1; offset < 50; offset++) {
+                if (!isPixelHuman(nextX + offset, nextY)) {
+                  lookRight = offset;
+                  break;
+                }
+              }
+
+              if (lookLeft > 0 && (lookLeft < lookRight || lookRight === 0)) {
+                drop.vx = -Math.random() * 10 - 6;
+              } else if (lookRight > 0) {
+                drop.vx = Math.random() * 10 + 6;
+              } else {
+                drop.vx = (Math.random() - 0.5) * 16;
+              }
+
+              drop.vy = -Math.random() * 6 - 3;
+              drop.length = Math.random() * 6 + 6;
+            }
+          }
+
+          if (drop.isDeflected) {
+            drop.vy += 1.2;
+            drop.life -= 0.05;
+            ctx.strokeStyle = `rgba(180, 230, 255, ${drop.life})`;
+          } else {
+            ctx.strokeStyle = 'rgba(200, 235, 255, 0.8)';
+          }
+
+          drop.x = nextX;
+          drop.y = nextY;
+          ctx.lineWidth = drop.weight;
+
+          ctx.beginPath();
+          ctx.moveTo(drop.x, drop.y);
+          ctx.lineTo(drop.x + drop.vx * 0.5, drop.y + drop.length);
+          ctx.stroke();
+
+          if (
+            drop.y > canvas.height ||
+            drop.x < 0 ||
+            drop.x > canvas.width ||
+            (drop.isDeflected && drop.life <= 0)
+          ) {
+            resetDrop(drop);
+          }
+        }
+
+        requestAnimationFrame(animate);
+      }
+    </script>
+  </body>
+</html>
